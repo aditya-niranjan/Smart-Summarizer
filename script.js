@@ -1,5 +1,5 @@
 // API Configuration
-const API_BASE_URL = 'https://smart-summarizer-uivm.onrender.com';
+const API_BASE_URL = 'https://smart-summarizer-535j.onrender.com';
 
 // DOM Elements
 let currentTab = 'youtube';
