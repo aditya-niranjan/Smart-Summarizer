@@ -1,5 +1,5 @@
 // API Configuration
-const API_BASE_URL = 'https://smart-summarizer-535j.onrender.com';
+const API_BASE_URL = window.location.origin;
 
 // DOM Elements
 let currentTab = 'youtube';
@@ -93,6 +93,11 @@ function showResults(data) {
     let infoText = '';
     if (data.video_url) {
         infoText = `Video URL: ${data.video_url}\nTranscript Length: ${data.transcript_length} characters`;
+        
+        // Show warning if metadata-only
+        if (data.metadata_only || data.warning) {
+            infoText += '\n\n⚠️ WARNING: ' + (data.warning || 'This summary is based on video metadata only');
+        }
     } else if (data.filename) {
         infoText = `File: ${data.filename}\nText Length: ${data.text_length} characters`;
     }

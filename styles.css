@@ -270,11 +270,14 @@ main {
 
 /* SUMMARY TEXT — improved for copying/exporting */
 .summary-text {
-    font-size: 1.1rem;
-    line-height: 1.7;
-    white-space: normal !important;      /* <-- important: prevent preformatted copying issues */
-    color: #000 !important;              /* ensure text is dark for PDFs */
+    font-size: 1.05rem;
+    line-height: 1.9;
+    white-space: normal !important;
+    color: #2c3e50 !important;
     background: transparent !important;
+    word-wrap: break-word;
+    max-width: 100%;
+    overflow-wrap: break-word;
 }
 
 /* Ensure inner elements render correctly in exports */
@@ -284,74 +287,138 @@ main {
 .summary-text h4,
 .summary-text li,
 .summary-text strong,
+.summary-text b,
 .summary-text em {
     color: inherit !important;
     background: transparent !important;
 }
 
-/* Make sure list indentation is correct */
-.summary-text ul {
-    padding-left: 25px;
-    margin-bottom: 12px;
-}
-
-.summary-text ul li {
-    margin-bottom: 8px;
-    line-height: 1.6;
-}
-
-
-.summary-text * {
-    color: #000 !important; /* ensures PDF never renders white text */
-}
-
-/* Improve readability when copying/exporting */
+/* Paragraphs */
 .summary-text p {
-    margin: 0 0 12px;
+    margin: 0 0 18px 0;
+    text-align: left;
+    color: #2c3e50 !important;
+    line-height: 1.9;
 }
 
-.summary-text ul {
-    padding-left: 20px;
+.summary-text p:last-child {
+    margin-bottom: 0;
 }
 
+/* Headings */
 .summary-text h3 {
-    color: #2a5298;
-    margin-top: 20px;
-    margin-bottom: 10px;
-    font-size: 1.3rem;
-    font-weight: 600;
-    border-bottom: 2px solid #2a5298;
-    padding-bottom: 5px;
+    color: #2a5298 !important;
+    margin-top: 26px;
+    margin-bottom: 14px;
+    font-size: 1.4rem;
+    font-weight: 700;
+    border-bottom: 3px solid #2a5298;
+    padding-bottom: 10px;
+    padding-top: 6px;
+    line-height: 1.4;
 }
 
 .summary-text h3:first-child {
     margin-top: 0;
 }
 
+.summary-text h4 {
+    color: #34495e !important;
+    margin-top: 20px;
+    margin-bottom: 12px;
+    font-size: 1.15rem;
+    font-weight: 600;
+    border-bottom: 2px solid #bdc3c7;
+    padding-bottom: 8px;
+    line-height: 1.4;
+}
+
+.summary-text h4:first-child {
+    margin-top: 0;
+}
+
+/* Lists */
 .summary-text ul {
-    margin-left: 20px;
-    margin-bottom: 15px;
+    padding-left: 30px;
+    margin: 12px 0 20px 0;
+    list-style-type: none;
 }
 
 .summary-text ul li {
-    margin-bottom: 8px;
-    line-height: 1.6;
+    margin-bottom: 12px;
+    line-height: 1.8;
+    position: relative;
+    padding-left: 8px;
+    color: #2c3e50 !important;
 }
 
-.summary-text strong {
-    color: #1e3c72;
-    font-weight: 600;
+.summary-text ul li::before {
+    content: "•";
+    color: #2a5298;
+    font-weight: bold;
+    font-size: 1.3em;
+    position: absolute;
+    left: -20px;
+    top: -2px;
 }
 
+/* Bold text */
+.summary-text strong,
+.summary-text b {
+    color: #1e3c72 !important;
+    font-weight: 700;
+}
+
+/* Italic text */
 .summary-text em {
     font-style: italic;
-    color: #555;
+    color: #555 !important;
+}
+
+/* Ensure all nested content is visible */
+.summary-text * {
+    color: #2c3e50 !important;
+}
+
+/* Special formatting for main topic headers in bullet summaries */
+.summary-text p strong:only-child {
+    display: block;
+    color: #2a5298 !important;
+    font-size: 1.15rem;
+    margin-top: 16px;
+    margin-bottom: 8px;
+    padding-bottom: 4px;
+    border-bottom: 2px solid #e0e0e0;
+}
+
+/* Metadata section styling */
+.summary-text > h4:first-child {
+    background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%);
+    padding: 12px 16px;
+    border-left: 4px solid #2a5298;
+    border-bottom: none;
+    border-radius: 6px;
+    margin-bottom: 16px;
+    font-size: 1.25rem;
+}
+
+/* Section dividers */
+.summary-text hr {
+    border: none;
+    border-top: 2px solid #e9ecef;
+    margin: 24px 0;
 }
 
 .summary-info {
-    font-size: 0.9rem;
+    font-size: 0.95rem;
     color: #666;
-    margin-bottom: 15px;
+    margin-bottom: 18px;
+    padding: 12px;
+    background: #f8f9fa;
+    border-radius: 6px;
+    white-space: pre-wrap;
+    line-height: 1.6;
+    border-left: 3px solid #6c757d;
 }
 
 .copy-btn {
