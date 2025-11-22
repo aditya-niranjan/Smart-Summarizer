@@ -1,13 +1,15 @@
 # main.py
 """
-Smart Summarizer - robust combined version (v1.2.9 Final)
+Smart Summarizer - robust combined version (v1.3.0)
 
-Enhancements over v1.2.6:
-- Universal language matching for subtitles (ISO codes + full names)
-- Skips audio download completely (Gemini can listen directly)
-- Uses Gemini to summarize non-English subtitles directly into English
-- Adds /health endpoint for monitoring
-- Adds Gemini safe retry + graceful fallback (no "Summary unavailable" message)
+Enhancements over v1.2.9:
+- Fixed YouTube bot detection with multiple fallback strategies
+- Improved user-agent headers and request handling
+- Better error messages for rate limiting and bot detection
+- Enhanced output formatting with improved CSS
+- Multiple extraction strategies (android, ios, mweb, tv_embedded)
+- Graceful fallback to metadata when transcripts unavailable
+- Better retry logic with 3 attempts per strategy
 """
 
 
@@ -90,19 +92,6 @@ def try_transcript_api(video_id: str, video_url: Optional[str] = None) -> Option
     - Prefers English, but falls back to any available language.
     """
     try:
-        # Optional fast pre-check via yt_dlp metadata
-        if video_url:
-            try:
-                info = _extract_with_stable_client(video_url, download=False)
-                all_subs = (info.get("subtitles") or {}) | (info.get("automatic_captions") or {})
-                # If all URLs end with .m3u8 → skip Transcript API
-                all_urls = [u.get("url", "") for v in all_subs.values() for u in v if isinstance(v, list)]
-                if any(".m3u8" in u for u in all_urls):
-                    log("Detected only HLS (.m3u8) subtitles — skipping YouTubeTranscriptApi.")
-                    return None
-            except Exception:
-                pass
-
         log("Attempting YouTubeTranscriptApi (optimized universal)...")
         transcripts = YouTubeTranscriptApi.list_transcripts(video_id)
 
@@ -145,19 +134,52 @@ def try_transcript_api(video_id: str, video_url: Optional[str] = None) -> Option
 # ---------------- yt-dlp Wrapper ----------------
 def _extract_with_stable_client(video_url: str, download: bool, extra_opts: Optional[dict] = None):
     ydl_opts = {
-        "quiet": True, "no_warnings": True, "skip_download": not download,
-        "extractor_args": {"youtube": {"player_client": ["default"], "skip_bad_formats": ["True"]}},
-        "retries": YTDLP_RETRIES, "socket_timeout": YTDLP_SOCKET_TIMEOUT,
+        "quiet": True,
+        "no_warnings": True,
+        "skip_download": not download,
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["android", "web"],
+                "skip": ["dash", "hls"],
+            }
+        },
+        "retries": 3,
+        "fragment_retries": 3,
+        "socket_timeout": 30,
+        "http_headers": {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-us,en;q=0.5",
+            "Sec-Fetch-Mode": "navigate",
+        },
     }
     if YTDLP_COOKIES: ydl_opts["cookiefile"] = YTDLP_COOKIES
     if extra_opts: ydl_opts.update(extra_opts)
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            return ydl.extract_info(video_url, download=download)
-    except Exception:
-        ydl_opts["extractor_args"]["youtube"]["player_client"] = ["android"]
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            return ydl.extract_info(video_url, download=download)
+    
+    # Try multiple strategies
+    strategies = [
+        {"player_client": ["android", "web"]},
+        {"player_client": ["ios"]},
+        {"player_client": ["mweb"]},
+        {"player_client": ["tv_embedded"]},
+    ]
+    
+    for strategy in strategies:
+        try:
+            ydl_opts["extractor_args"]["youtube"].update(strategy)
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                return ydl.extract_info(video_url, download=download)
+        except Exception as e:
+            error_str = str(e).lower()
+            if "sign in" in error_str or "bot" in error_str:
+                log(f"Bot detection with {strategy}, trying next strategy...")
+                continue
+            elif strategy == strategies[-1]:
+                raise
+            else:
+                continue
+    
+    raise Exception("All extraction strategies failed")
 
 def _subtitle_to_plain(s: str) -> str:
     s = s.strip()
@@ -233,7 +255,11 @@ def try_ytdlp_subtitles(video_url: str) -> Optional[str]:
             if not url:
                 continue
             try:
-                r = requests.get(url, timeout=REQUEST_TIMEOUT)
+                headers = {
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                    "Accept-Language": "en-US,en;q=0.9",
+                }
+                r = requests.get(url, timeout=REQUEST_TIMEOUT, headers=headers)
                 if r.status_code == 200 and r.text.strip():
                     text = r.text
 
@@ -289,19 +315,78 @@ def extract_transcript_from_youtube(video_url: str) -> str:
             info = _extract_with_stable_client(video_url, download=False)
             title = info.get("title", "")
             desc = info.get("description", "")
-            transcript = f"Title: {title}\n\nDescription:\n{desc}"
+            if title or desc:
+                transcript = f"Title: {title}\n\nDescription:\n{desc}"
+                log(f"Using metadata fallback: title='{title[:50]}...', desc_length={len(desc)}")
         except Exception as e:
             log(f"Metadata fetch failed: {e}")
             transcript = ""
 
     if transcript and transcript.strip():
         return transcript
+    
+    # Last attempt: try to get any metadata
     try:
+        log("Final attempt: fetching video metadata...")
         info = _extract_with_stable_client(video_url, download=False)
-        return f"Title: {info.get('title','')}\n\nDescription:\n{info.get('description','')}"
-    except Exception:
-        pass
-    raise HTTPException(status_code=400, detail="Transcript unavailable.")
+        title = info.get("title", "No title available")
+        desc = info.get("description", "No description available")
+        uploader = info.get("uploader", "Unknown")
+        duration = info.get("duration", 0)
+        view_count = info.get("view_count", 0)
+        upload_date = info.get("upload_date", "Unknown")
+        
+        # Format duration
+        if duration:
+            mins = duration // 60
+            secs = duration % 60
+            duration_str = f"{mins}:{secs:02d}"
+        else:
+            duration_str = "Unknown"
+        
+        # Format view count
+        if view_count:
+            if view_count >= 1000000:
+                view_str = f"{view_count/1000000:.1f}M views"
+            elif view_count >= 1000:
+                view_str = f"{view_count/1000:.1f}K views"
+            else:
+                view_str = f"{view_count} views"
+        else:
+            view_str = "Unknown views"
+        
+        # Format upload date
+        if upload_date and upload_date != "Unknown":
+            try:
+                year = upload_date[:4]
+                month = upload_date[4:6]
+                day = upload_date[6:8]
+                upload_date = f"{year}-{month}-{day}"
+            except:
+                pass
+        
+        fallback_text = f"""Video Title: {title}
+
+Uploader: {uploader}
+Duration: {duration_str}
+Views: {view_str}
+Upload Date: {upload_date}
+
+Description:
+{desc}
+
+Note: Transcript/subtitles were not available for this video. This summary is based on the video metadata only."""
+        
+        if fallback_text.strip():
+            log("Successfully retrieved metadata for summarization")
+            return fallback_text
+    except Exception as e:
+        log(f"Final metadata fetch also failed: {e}")
+    
+    raise HTTPException(
+        status_code=400, 
+        detail="Unable to extract transcript or metadata from this video. This may be because: 1) The video has no subtitles/captions, 2) The video is private or age-restricted, 3) YouTube is blocking automated access. Please try a different video."
+    )
 
 # ---------------- PDF Extraction ----------------
 def extract_pdf_text(pdf_path: str) -> str:
@@ -452,7 +537,9 @@ Content:
             continue
 
     if not partials:
-        return text[:1500] + "..."
+        # No AI summary generated - format the raw text as metadata
+        log("⚠ No AI summary generated - returning formatted metadata")
+        return format_summary_output(text[:1500], "short")
 
     # -------- Skip merge for single chunk --------
     if len(partials) == 1:
@@ -541,100 +628,132 @@ Partial summaries:
 
 # ----------- HTML Styling Formatter -----------
 def format_summary_output(text: str, summary_type: str) -> str:
+    """Format summary text into clean, readable HTML"""
     text = text.strip()
     if not text:
         return ""
 
-    # --- Convert bold (**text**) to <b>text</b> ---
-    text = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text)
-
+    # Convert markdown bold to HTML
+    text = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", text)
+    
     if summary_type == "bullet":
-        # Convert markdown formatting
-        text = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text)
+        lines = text.splitlines()
+        html_parts = []
+        current_list = []
+        in_intro = True
         
-        # Process organized format with main topics and sub-topics
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            
+            # Check for main topic headers (bold text with colon at end)
+            if re.match(r"^<strong>.+:</strong>$", line):
+                # Close any open list
+                if current_list:
+                    html_parts.append("<ul>" + "".join(f"<li>{item}</li>" for item in current_list) + "</ul>")
+                    current_list = []
+                in_intro = False
+                # Add as section header
+                html_parts.append(f"<h4>{line.replace('<strong>', '').replace('</strong>', '')}</h4>")
+                
+            # Bullet points
+            elif line.startswith("-") or line.startswith("•") or line.startswith("*"):
+                in_intro = False
+                bullet_text = re.sub(r"^[-•*]\s*", "", line)
+                current_list.append(bullet_text)
+                
+            # Regular paragraphs (intro text, etc)
+            else:
+                # Close any open list
+                if current_list:
+                    html_parts.append("<ul>" + "".join(f"<li>{item}</li>" for item in current_list) + "</ul>")
+                    current_list = []
+                html_parts.append(f"<p>{line}</p>")
+        
+        # Close final list if open
+        if current_list:
+            html_parts.append("<ul>" + "".join(f"<li>{item}</li>" for item in current_list) + "</ul>")
+        
+        return "\n".join(html_parts)
+
+    elif summary_type in ["detailed", "comprehensive"]:
+        # Convert markdown headers
+        text = re.sub(r"^###\s*(.+)$", r"<h4>\1</h4>", text, flags=re.MULTILINE)
+        text = re.sub(r"^##\s*(.+)$", r"<h3>\1</h3>", text, flags=re.MULTILINE)
+        text = re.sub(r"^#\s*(.+)$", r"<h3>\1</h3>", text, flags=re.MULTILINE)
+        
+        # Convert strong tags with colons to headers
+        text = re.sub(r"<strong>([^<]+:)</strong>", r"<h4>\1</h4>", text)
+        
+        # Process line by line
         lines = text.splitlines()
         html_parts = []
         current_list = []
         
         for line in lines:
-            line_stripped = line.strip()
-            
-            # Check if it's a main topic header (bold with colon or multiple asterisks)
-            is_main_header = re.match(r"^<b>.+:</b>$", line_stripped)
-            
-            # Check if it's a sub-topic bullet with bold label (indicates main topic structure)
-            is_subtopic = re.match(r"^-\s*<b>.+:</b>", line_stripped)
-            
-            if is_main_header:
-                # Output any existing list
+            line = line.strip()
+            if not line:
+                continue
+                
+            # Already formatted headers
+            if line.startswith("<h") or line.startswith("</"):
                 if current_list:
-                    html_parts.append("<ul>\n" + "\n".join(f"<li>{item}</li>" for item in current_list) + "\n</ul>")
+                    html_parts.append("<ul>" + "".join(f"<li>{item}</li>" for item in current_list) + "</ul>")
                     current_list = []
-                # Add main topic header
-                html_parts.append(f"<p style='font-weight: bold; font-size: 1.1em; margin-top: 15px;'>{line_stripped}</p>")
-            
-            # Check if it's a regular paragraph (not a bullet)
-            elif line_stripped and not line_stripped.startswith("-"):
-                # Output any existing list first
+                html_parts.append(line)
+                
+            # Bullet points
+            elif re.match(r"^[-*•]\s", line):
+                bullet = re.sub(r"^[-*•]\s*", "", line)
+                current_list.append(bullet)
+                
+            # Regular paragraphs
+            else:
                 if current_list:
-                    html_parts.append("<ul>\n" + "\n".join(f"<li>{item}</li>" for item in current_list) + "\n</ul>")
+                    html_parts.append("<ul>" + "".join(f"<li>{item}</li>" for item in current_list) + "</ul>")
                     current_list = []
-                # Add paragraph
-                if line_stripped:
-                    html_parts.append(f"<p>{line_stripped}</p>")
-            
-            # It's a bullet point (sub-topic or regular bullet)
-            elif line_stripped.startswith("-"):
-                bullet_text = line_stripped[1:].strip()
-                if bullet_text:
-                    # Check if this is a sub-topic with bold label
-                    if re.match(r"^<b>.+:</b>", bullet_text):
-                        # Extract the bold part and the explanation
-                        match = re.match(r"^(<b>.+?:</b>)\s*(.*)", bullet_text)
-                        if match:
-                            label = match.group(1)
-                            explanation = match.group(2)
-                            # Format as: **Label:** Explanation text
-                            formatted = f"{label} {explanation}" if explanation else label
-                            current_list.append(formatted)
-                    else:
-                        current_list.append(bullet_text)
+                html_parts.append(f"<p>{line}</p>")
         
-        # Don't forget the last list
+        # Close final list
         if current_list:
-            html_parts.append("<ul>\n" + "\n".join(f"<li>{item}</li>" for item in current_list) + "\n</ul>")
+            html_parts.append("<ul>" + "".join(f"<li>{item}</li>" for item in current_list) + "</ul>")
         
         return "\n".join(html_parts)
 
-    elif summary_type in ["detailed"]:
-        # Convert Markdown headers and bullets to HTML
-        text = re.sub(r"^###\s*(.+)$", r"<h4>\1</h4>", text, flags=re.MULTILINE)
-        text = re.sub(r"^##\s*(.+)$", r"<h3>\1</h3>", text, flags=re.MULTILINE)
-
-        # Additional fixes — catch missing spaces
-        text = re.sub(r"^###(.+)$", r"<h4>\1</h4>", text, flags=re.MULTILINE)
-        text = re.sub(r"^##(.+)$", r"<h3>\1</h3>", text, flags=re.MULTILINE)
-
-        # Convert bolded colon lines (**Term:**) into section headers
-        text = re.sub(r"<b>([^<:]+:)</b>", r"<h4>\1</h4>", text)
-
-        # Convert bullet lines
-        lines = [ln.strip() for ln in text.splitlines()]
-        formatted = []
-        for ln in lines:
-            if re.match(r"^[-*•]", ln):
-                ln = re.sub(r"^[-*•]\s*", "", ln)
-                formatted.append(f"<li>{ln}</li>")
-            else:
-                formatted.append(ln)
-        html = "\n".join(formatted)
-        html = re.sub(r"(<li>.+?</li>)+", lambda m: f"<ul>{m.group(0)}</ul>", html)
-        return html
-
     else:  # short summary
-        paras = [f"<p>{p.strip()}</p>" for p in text.split("\n\n") if p.strip()]
-        return "\n".join(paras)
+        lines = text.splitlines()
+        html_parts = []
+        
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            
+            # Headers/metadata (Video Title:, Description:, etc)
+            if re.match(r"^(Video Title|Title|Uploader|Duration|Views|Upload Date|Description|Note):", line):
+                html_parts.append(f"<h4>{line}</h4>")
+            # Regular text
+            else:
+                html_parts.append(f"<p>{line}</p>")
+        
+        # Group consecutive paragraphs
+        result = []
+        para_buffer = []
+        
+        for part in html_parts:
+            if part.startswith("<h4>"):
+                if para_buffer:
+                    result.append("<p>" + " ".join(p.replace("<p>", "").replace("</p>", "") for p in para_buffer) + "</p>")
+                    para_buffer = []
+                result.append(part)
+            elif part.startswith("<p>"):
+                para_buffer.append(part)
+        
+        if para_buffer:
+            result.append("<p>" + " ".join(p.replace("<p>", "").replace("</p>", "") for p in para_buffer) + "</p>")
+        
+        return "\n".join(result)
     
 
 # ---------------- Endpoints ----------------
@@ -654,8 +773,14 @@ async def serve_js():
 async def health():
     return {
         "status": "ok",
-        "version": "1.2.9",
-        "gemini_configured": bool(GEMINI_KEY)
+        "version": "1.3.0",
+        "gemini_configured": bool(GEMINI_KEY),
+        "features": [
+            "YouTube bot detection bypass",
+            "Multiple extraction strategies",
+            "Enhanced error handling",
+            "Improved formatting"
+        ]
     }
 
 @app.post("/summarize/youtube")
@@ -666,10 +791,17 @@ async def summarize_youtube(video_url: str = Form(...),
     try:
         log(f"Processing YouTube: {video_url[:50]}... ({summary_type})")
         transcript = extract_transcript_from_youtube(video_url)
-        if not transcript.strip():
-            raise HTTPException(status_code=400, detail="No transcript found.")
         
-        log("Generating summary...")
+        if not transcript.strip():
+            raise HTTPException(
+                status_code=400, 
+                detail="No content could be extracted from this video. Please try a different video."
+            )
+        
+        # Check if we're using fallback metadata
+        is_metadata_only = "Note: Transcript/subtitles were not available" in transcript
+        
+        log(f"Generating summary... (metadata_only={is_metadata_only})")
         final = summarize_via_gemini(transcript, summary_type, bullet_count, "en")
         
         return {
@@ -677,13 +809,29 @@ async def summarize_youtube(video_url: str = Form(...),
             "summary": final, 
             "video_url": video_url,
             "summary_type": summary_type,
-            "transcript_length": len(transcript)
+            "transcript_length": len(transcript),
+            "metadata_only": is_metadata_only,
+            "warning": "This summary is based on video metadata only (no transcript available)" if is_metadata_only else None
         }
     except HTTPException:
         raise
     except Exception as e:
         log(f"Error in YouTube summarization: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        error_message = str(e)
+        
+        # Handle specific error cases
+        if "HTTP Error 429" in error_message or "Too Many Requests" in error_message:
+            error_message = "YouTube is rate-limiting requests. Please wait a few minutes and try again."
+        elif "sign in" in error_message.lower() or "bot" in error_message.lower():
+            error_message = "YouTube detected automated access. This usually resolves itself after a few minutes. Try again shortly, or use a different video."
+        elif "Private video" in error_message or "unavailable" in error_message.lower():
+            error_message = "This video is private, unavailable, or age-restricted and cannot be accessed."
+        elif "Video unavailable" in error_message:
+            error_message = "This video is not available. It may have been deleted or made private."
+        elif "All extraction strategies failed" in error_message:
+            error_message = "Unable to access this video. YouTube may be blocking automated requests. Please try again in a few minutes or use a different video."
+        
+        raise HTTPException(status_code=500, detail=error_message)
 
 @app.post("/summarize/pdf")
 async def summarize_pdf(file: UploadFile = File(...),
